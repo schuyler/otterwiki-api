@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "otterwiki-api"
+description = "REST API plugin for An Otter Wiki"
+version = "0.1.0"
+requires-python = ">=3.9"
+license = "MIT"
+dependencies = [
+    "otterwiki",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.entry-points.otterwiki]
+api = "otterwiki_api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
