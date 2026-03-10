@@ -76,7 +76,8 @@ def list_pages():
 
         frontmatter, body = parse_frontmatter(content)
         fm = frontmatter or {}
-        name = fm.get("title", get_pagename(filename))
+        display_path = get_pagename(filename)
+        name = fm.get("title", display_path.rsplit("/", 1)[-1])
         page_category = fm.get("category")
         page_tags = fm.get("tags", [])
         if isinstance(page_tags, str):
@@ -119,7 +120,7 @@ def list_pages():
 
         pages.append({
             "name": name,
-            "path": page_path,
+            "path": display_path,
             "category": page_category,
             "tags": page_tags,
             "last_updated": last_updated,
@@ -143,8 +144,8 @@ def get_page(path):
         return jsonify({"error": f"Page not found: {path}"}), 404
 
     frontmatter, body = parse_frontmatter(content)
-    page_path = filename[:-3] if filename.endswith(".md") else filename
-    name = (frontmatter or {}).get("title", get_pagename(filename))
+    display_path = get_pagename(filename)
+    name = (frontmatter or {}).get("title", display_path.rsplit("/", 1)[-1])
 
     # Get last commit info
     last_commit = None
@@ -161,19 +162,20 @@ def get_page(path):
     except Exception:
         pass
 
-    # WikiLink info
+    # WikiLink info — use raw path for index lookup, title-case for response
     index = _state.get("wikilink_index")
+    raw_path = filename[:-3] if filename.endswith(".md") else filename
     if index:
-        link_data = index.get_links_for_page(page_path)
-        links_to = link_data["outgoing"]
-        linked_from = link_data["incoming"]
+        link_data = index.get_links_for_page(raw_path)
+        links_to = [get_pagename(p) for p in link_data["outgoing"]]
+        linked_from = [get_pagename(p) for p in link_data["incoming"]]
     else:
         links_to = []
         linked_from = []
 
     return jsonify({
         "name": name,
-        "path": page_path,
+        "path": display_path,
         "content": content,  # raw markdown INCLUDING frontmatter per PRD
         "frontmatter": frontmatter,
         "links_to": links_to,
@@ -208,23 +210,23 @@ def put_page(path):
         index.update_page(filename, content)
 
     # Get revision
-    page_path = filename[:-3] if filename.endswith(".md") else filename
-    rev_short = ""
+    display_path = get_pagename(filename)
+    rev_full = ""
     try:
         meta = storage.metadata(filename)
-        rev_short = meta.get("revision", "")
+        rev_full = meta.get("revision-full", "")
     except Exception:
         pass
 
     # Derive name
     frontmatter, _ = parse_frontmatter(content)
-    name = (frontmatter or {}).get("title", get_pagename(filename))
+    name = (frontmatter or {}).get("title", display_path.rsplit("/", 1)[-1])
 
     status = 201 if is_new else 200
     return jsonify({
         "name": name,
-        "path": page_path,
-        "revision": rev_short,
+        "path": display_path,
+        "revision": rev_full,
         "created": is_new,
     }), status
 
@@ -248,7 +250,7 @@ def delete_page(path):
     if index:
         index.remove_page(filename)
 
-    return jsonify({"deleted": True, "path": path})
+    return jsonify({"deleted": True, "path": get_pagename(filename)})
 
 
 # --- History ---
@@ -270,7 +272,7 @@ def page_history(path):
         return jsonify({"error": f"No history for: {path}"}), 404
 
     history = [_format_log_entry(entry) for entry in log]
-    return jsonify({"path": path, "history": history})
+    return jsonify({"path": get_pagename(filename), "history": history})
 
 
 # --- Search ---
@@ -300,13 +302,13 @@ def page_links(path):
 
     config = _state["app"].config
     retain_case = config.get("RETAIN_PAGE_NAME_CASE", False)
-    page_path = path if retain_case else path.lower()
+    lookup_path = path if retain_case else path.lower()
 
-    link_data = index.get_links_for_page(page_path)
+    link_data = index.get_links_for_page(lookup_path)
     return jsonify({
-        "path": page_path,
-        "links_to": link_data["outgoing"],
-        "linked_from": link_data["incoming"],
+        "path": get_pagename(path),
+        "links_to": [get_pagename(p) for p in link_data["outgoing"]],
+        "linked_from": [get_pagename(p) for p in link_data["incoming"]],
     })
 
 
@@ -318,7 +320,13 @@ def full_link_graph():
         return jsonify({"error": "WikiLink index not available"}), 500
 
     graph = index.get_full_graph()
-    return jsonify(graph)
+    return jsonify({
+        "nodes": [get_pagename(n) for n in graph["nodes"]],
+        "edges": [
+            {"source": get_pagename(e["source"]), "target": get_pagename(e["target"])}
+            for e in graph["edges"]
+        ],
+    })
 
 
 # --- Changelog ---
@@ -339,7 +347,7 @@ def changelog():
         pages_affected = []
         for f in entry.get("files", []):
             if f and f.endswith(".md"):
-                pages_affected.append(f[:-3])
+                pages_affected.append(get_pagename(f))
 
         e = _format_log_entry(entry)
         e["pages_affected"] = pages_affected

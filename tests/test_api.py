@@ -61,7 +61,7 @@ class TestPageCRUD:
         )
         assert r.status_code == 201
         data = r.get_json()
-        assert data["path"] == "test-page"
+        assert data["path"] == "Test-Page"
         assert data["created"] is True
         assert data["revision"]
         assert data["name"]
@@ -207,7 +207,7 @@ class TestPageCRUD:
             headers=AUTH_HEADERS,
         )
         assert r.status_code == 201
-        assert r.get_json()["path"] == "projects/my-project"
+        assert r.get_json()["path"] == "Projects/My-Project"
 
         r = test_client.get("/api/v1/pages/projects/my-project", headers=AUTH_HEADERS)
         assert r.status_code == 200
@@ -249,14 +249,14 @@ class TestListPages:
         self._seed_pages(test_client)
         r = test_client.get("/api/v1/pages", headers=AUTH_HEADERS)
         paths = [p["path"] for p in r.get_json()["pages"]]
-        assert "docs/intro" in paths
-        assert "blog/first-post" in paths
+        assert "Docs/Intro" in paths
+        assert "Blog/First-Post" in paths
 
     def test_list_prefix_filter(self, test_client):
         self._seed_pages(test_client)
         r = test_client.get("/api/v1/pages?prefix=docs/", headers=AUTH_HEADERS)
         pages = r.get_json()["pages"]
-        assert all(p["path"].startswith("docs/") for p in pages)
+        assert all(p["path"].startswith("Docs/") for p in pages)
         assert len(pages) == 2
 
     def test_list_tag_filter(self, test_client):
@@ -265,8 +265,8 @@ class TestListPages:
         pages = r.get_json()["pages"]
         assert len(pages) == 2
         paths = [p["path"] for p in pages]
-        assert "docs/intro" in paths
-        assert "docs/advanced" in paths
+        assert "Docs/Intro" in paths
+        assert "Docs/Advanced" in paths
 
     def test_list_category_filter(self, test_client):
         """PRD: ?category= filter on frontmatter category field."""
@@ -274,7 +274,7 @@ class TestListPages:
         r = test_client.get("/api/v1/pages?category=blog", headers=AUTH_HEADERS)
         pages = r.get_json()["pages"]
         assert len(pages) == 1
-        assert pages[0]["path"] == "blog/first-post"
+        assert pages[0]["path"] == "Blog/First-Post"
 
     def test_list_updated_since_filter(self, test_client):
         self._seed_pages(test_client)
@@ -347,7 +347,7 @@ class TestSearch:
         assert "total" in data
         results = data["results"]
         assert len(results) >= 1
-        result = next(res for res in results if res["path"] == "searchable")
+        result = next(res for res in results if res["path"] == "Searchable")
         assert "name" in result
         assert "snippet" in result
         assert "score" in result
@@ -393,8 +393,8 @@ class TestLinks:
         r = test_client.get("/api/v1/links/link-source", headers=AUTH_HEADERS)
         assert r.status_code == 200
         data = r.get_json()
-        assert "target page" in data["links_to"]
-        assert "another" in data["links_to"]
+        assert "Target Page" in data["links_to"]
+        assert "Another" in data["links_to"]
 
     def test_incoming_links(self, test_client):
         test_client.put(
@@ -404,7 +404,7 @@ class TestLinks:
         )
         r = test_client.get("/api/v1/links/target-b", headers=AUTH_HEADERS)
         data = r.get_json()
-        assert "source-a" in data["linked_from"]
+        assert "Source-A" in data["linked_from"]
 
     def test_full_link_graph(self, test_client):
         test_client.put(
@@ -420,8 +420,8 @@ class TestLinks:
         r = test_client.get("/api/v1/links", headers=AUTH_HEADERS)
         assert r.status_code == 200
         graph = r.get_json()
-        assert "node a" in graph["nodes"]
-        assert "node b" in graph["nodes"]
+        assert "Node A" in graph["nodes"]
+        assert "Node B" in graph["nodes"]
         assert len(graph["edges"]) >= 2
 
     def test_links_on_get_page(self, test_client):
@@ -433,7 +433,7 @@ class TestLinks:
         )
         r = test_client.get("/api/v1/pages/link-page", headers=AUTH_HEADERS)
         data = r.get_json()
-        assert "other" in data["links_to"]
+        assert "Other" in data["links_to"]
         assert isinstance(data["linked_from"], list)
 
     def test_links_updated_after_edit(self, test_client):
@@ -443,7 +443,7 @@ class TestLinks:
             headers=AUTH_HEADERS,
         )
         r = test_client.get("/api/v1/links/editable", headers=AUTH_HEADERS)
-        assert "oldtarget" in r.get_json()["links_to"]
+        assert "Oldtarget" in r.get_json()["links_to"]
 
         test_client.put(
             "/api/v1/pages/editable",
@@ -452,8 +452,8 @@ class TestLinks:
         )
         r = test_client.get("/api/v1/links/editable", headers=AUTH_HEADERS)
         data = r.get_json()
-        assert "newtarget" in data["links_to"]
-        assert "oldtarget" not in data["links_to"]
+        assert "Newtarget" in data["links_to"]
+        assert "Oldtarget" not in data["links_to"]
 
     def test_links_removed_after_delete(self, test_client):
         test_client.put(

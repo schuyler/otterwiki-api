@@ -2,6 +2,7 @@
 
 import re
 
+from otterwiki_api import get_pagename
 from otterwiki_api.frontmatter import parse_frontmatter
 
 
@@ -36,10 +37,10 @@ def search_pages(storage, query, config):
         except Exception:
             continue
 
-        page_path = filename[:-3]  # strip .md
+        display_path = get_pagename(filename)
 
         frontmatter, body = parse_frontmatter(content)
-        name = (frontmatter or {}).get("title", _name_from_path(page_path, config))
+        name = (frontmatter or {}).get("title", display_path.rsplit("/", 1)[-1])
 
         # Score: title match is worth more, count term matches
         title_score = 0
@@ -78,7 +79,7 @@ def search_pages(storage, query, config):
 
         results.append({
             "name": name,
-            "path": page_path,
+            "path": display_path,
             "snippet": snippet,
             "score": score,
         })
@@ -86,12 +87,3 @@ def search_pages(storage, query, config):
     # Sort by score descending
     results.sort(key=lambda r: r["score"], reverse=True)
     return results
-
-
-def _name_from_path(page_path, config):
-    """Derive a display name from a page path."""
-    name = page_path.rsplit("/", 1)[-1]
-    retain_case = config.get("RETAIN_PAGE_NAME_CASE", False)
-    if not retain_case:
-        name = name.title()
-    return name
