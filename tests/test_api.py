@@ -213,6 +213,186 @@ class TestPageCRUD:
         assert r.status_code == 200
 
 
+# --- Patch (edit-in-place) tests ---
+
+
+class TestPatchPage:
+    def _create_and_get_rev(self, client, path, content):
+        """Helper: create a page and return its revision SHA."""
+        client.put(f"/api/v1/pages/{path}", json={"content": content}, headers=AUTH_HEADERS)
+        r = client.get(f"/api/v1/pages/{path}", headers=AUTH_HEADERS)
+        return r.get_json()["revision"]
+
+    def test_successful_edit(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-test", "Hello world")
+        r = test_client.patch(
+            "/api/v1/pages/patch-test",
+            json={"revision": rev, "old_string": "Hello", "new_string": "Goodbye"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data["path"] == "Patch-Test"
+        assert data["revision"]
+        assert data["revision"] != rev
+
+        # Verify content changed
+        r = test_client.get("/api/v1/pages/patch-test", headers=AUTH_HEADERS)
+        assert r.get_json()["content"] == "Goodbye world"
+
+    def test_edit_frontmatter(self, test_client):
+        content = "---\nconfidence: medium\n---\nBody text"
+        rev = self._create_and_get_rev(test_client, "patch-fm", content)
+        r = test_client.patch(
+            "/api/v1/pages/patch-fm",
+            json={"revision": rev, "old_string": "confidence: medium", "new_string": "confidence: high"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        r = test_client.get("/api/v1/pages/patch-fm", headers=AUTH_HEADERS)
+        assert "confidence: high" in r.get_json()["content"]
+
+    def test_delete_text_with_empty_new_string(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-del", "Keep this. Remove this.")
+        r = test_client.patch(
+            "/api/v1/pages/patch-del",
+            json={"revision": rev, "old_string": " Remove this.", "new_string": ""},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        r = test_client.get("/api/v1/pages/patch-del", headers=AUTH_HEADERS)
+        assert r.get_json()["content"] == "Keep this."
+
+    def test_revision_mismatch_409(self, test_client):
+        self._create_and_get_rev(test_client, "patch-conflict", "Original")
+        r = test_client.patch(
+            "/api/v1/pages/patch-conflict",
+            json={"revision": "deadbeef00000000", "old_string": "Original", "new_string": "Changed"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 409
+        data = r.get_json()
+        assert "Revision mismatch" in data["error"]
+        assert "current_revision" in data
+
+    def test_old_string_not_found_422(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-missing", "Hello world")
+        r = test_client.patch(
+            "/api/v1/pages/patch-missing",
+            json={"revision": rev, "old_string": "nonexistent text", "new_string": "replacement"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "not found" in r.get_json()["error"]
+
+    def test_ambiguous_old_string_422(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-ambig", "foo bar foo")
+        r = test_client.patch(
+            "/api/v1/pages/patch-ambig",
+            json={"revision": rev, "old_string": "foo", "new_string": "baz"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "ambiguous" in r.get_json()["error"]
+        assert "2" in r.get_json()["error"]
+
+    def test_page_not_found_404(self, test_client):
+        r = test_client.patch(
+            "/api/v1/pages/no-such-page",
+            json={"revision": "abcdef1234567", "old_string": "x", "new_string": "y"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 404
+
+    def test_missing_required_field(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-fields", "content")
+        r = test_client.patch(
+            "/api/v1/pages/patch-fields",
+            json={"revision": rev, "old_string": "content"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "new_string" in r.get_json()["error"]
+
+    def test_identical_strings_422(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-same", "Hello")
+        r = test_client.patch(
+            "/api/v1/pages/patch-same",
+            json={"revision": rev, "old_string": "Hello", "new_string": "Hello"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "identical" in r.get_json()["error"]
+
+    def test_custom_commit_message(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-msg", "Alpha")
+        test_client.patch(
+            "/api/v1/pages/patch-msg",
+            json={
+                "revision": rev,
+                "old_string": "Alpha",
+                "new_string": "Beta",
+                "commit_message": "[mcp] custom edit message",
+            },
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.get("/api/v1/pages/patch-msg/history", headers=AUTH_HEADERS)
+        msg = r.get_json()["history"][0]["message"]
+        assert msg == "[mcp] custom edit message"
+
+    def test_short_revision_accepted(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-short-rev", "Content here")
+        short_rev = rev[:7]
+        r = test_client.patch(
+            "/api/v1/pages/patch-short-rev",
+            json={"revision": short_rev, "old_string": "Content", "new_string": "New content"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+
+    def test_wikilink_index_updated(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-links", "See [[OldTarget]]")
+        test_client.patch(
+            "/api/v1/pages/patch-links",
+            json={"revision": rev, "old_string": "[[OldTarget]]", "new_string": "[[NewTarget]]"},
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.get("/api/v1/links/patch-links", headers=AUTH_HEADERS)
+        data = r.get_json()
+        assert "Newtarget" in data["links_to"]
+        assert "Oldtarget" not in data["links_to"]
+
+    def test_empty_revision_rejected(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-empty-rev", "Hello")
+        r = test_client.patch(
+            "/api/v1/pages/patch-empty-rev",
+            json={"revision": "", "old_string": "Hello", "new_string": "Bye"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "at least 7" in r.get_json()["error"]
+
+    def test_too_short_revision_rejected(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-short", "Hello")
+        r = test_client.patch(
+            "/api/v1/pages/patch-short",
+            json={"revision": rev[:3], "old_string": "Hello", "new_string": "Bye"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "at least 7" in r.get_json()["error"]
+
+    def test_empty_old_string_rejected(self, test_client):
+        rev = self._create_and_get_rev(test_client, "patch-empty-old", "Hello")
+        r = test_client.patch(
+            "/api/v1/pages/patch-empty-old",
+            json={"revision": rev, "old_string": "", "new_string": "something"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "empty" in r.get_json()["error"]
+
+
 # --- List tests (PRD: {name, path, category, tags, last_updated, content_length}) ---
 
 

@@ -231,6 +231,85 @@ def put_page(path):
     }), status
 
 
+@api_bp.route("/pages/<path:path>", methods=["PATCH"])
+def patch_page(path):
+    """Edit-in-place with optimistic locking. Body: {revision, old_string, new_string, commit_message?}."""
+    storage = _state["storage"]
+    filename = get_filename(path)
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({"error": "Request body is required"}), 422
+
+    # Validate required fields
+    for field in ("revision", "old_string", "new_string"):
+        if field not in data:
+            return jsonify({"error": f"Missing required field: {field}"}), 422
+
+    revision = data["revision"]
+    old_string = data["old_string"]
+    new_string = data["new_string"]
+
+    if not old_string:
+        return jsonify({"error": "old_string must not be empty"}), 422
+    if not revision or len(revision) < 7:
+        return jsonify({"error": "revision must be at least 7 characters"}), 422
+    if old_string == new_string:
+        return jsonify({"error": "old_string and new_string are identical"}), 422
+
+    if not storage.exists(filename):
+        return jsonify({"error": f"Page not found: {path}"}), 404
+
+    # Optimistic lock: check revision matches
+    meta = storage.metadata(filename)
+    current_rev = meta.get("revision-full", "")
+    if not current_rev.startswith(revision):
+        return jsonify({
+            "error": "Revision mismatch: page has been modified since last read.",
+            "current_revision": current_rev,
+        }), 409
+
+    # Load content and find old_string
+    content = storage.load(filename)
+    count = content.count(old_string)
+    if count == 0:
+        return jsonify({"error": "old_string not found in page content"}), 422
+    if count > 1:
+        return jsonify({
+            "error": f"old_string is ambiguous: found {count} occurrences. Provide a longer unique string."
+        }), 422
+
+    # Replace
+    new_content = content.replace(old_string, new_string, 1)
+
+    author = get_author()
+    message = _commit_message(data, "Edit", path)
+    storage.store(filename=filename, content=new_content, message=message, author=author)
+
+    # Update wikilink index
+    index = _state.get("wikilink_index")
+    if index:
+        index.update_page(filename, new_content)
+
+    # Get new revision
+    display_path = get_pagename(filename)
+    rev_full = ""
+    try:
+        new_meta = storage.metadata(filename)
+        rev_full = new_meta.get("revision-full", "")
+    except Exception:
+        pass
+
+    frontmatter, _ = parse_frontmatter(new_content)
+    name = (frontmatter or {}).get("title", display_path.rsplit("/", 1)[-1])
+
+    return jsonify({
+        "name": name,
+        "path": display_path,
+        "revision": rev_full,
+    })
+
+
 @api_bp.route("/pages/<path:path>", methods=["DELETE"])
 def delete_page(path):
     storage = _state["storage"]
