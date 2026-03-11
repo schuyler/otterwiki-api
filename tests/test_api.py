@@ -52,6 +52,12 @@ class TestAuth:
 
 
 class TestPageCRUD:
+    def _create_and_get_rev(self, client, path, content):
+        """Helper: create a page and return its revision SHA."""
+        client.put(f"/api/v1/pages/{path}", json={"content": content}, headers=AUTH_HEADERS)
+        r = client.get(f"/api/v1/pages/{path}", headers=AUTH_HEADERS)
+        return r.get_json()["revision"]
+
     def test_create_page(self, test_client):
         """PUT returns {name, path, revision, created} per PRD."""
         r = test_client.put(
@@ -134,14 +140,10 @@ class TestPageCRUD:
         assert r.status_code == 404
 
     def test_update_page(self, test_client):
-        test_client.put(
-            "/api/v1/pages/update-test",
-            json={"content": "Version 1"},
-            headers=AUTH_HEADERS,
-        )
+        rev = self._create_and_get_rev(test_client, "update-test", "Version 1")
         r = test_client.put(
             "/api/v1/pages/update-test",
-            json={"content": "Version 2"},
+            json={"content": "Version 2", "revision": rev},
             headers=AUTH_HEADERS,
         )
         assert r.status_code == 200
@@ -151,6 +153,60 @@ class TestPageCRUD:
         # Verify content via GET
         r = test_client.get("/api/v1/pages/update-test", headers=AUTH_HEADERS)
         assert r.get_json()["content"] == "Version 2"
+
+    def test_update_without_revision_409(self, test_client):
+        self._create_and_get_rev(test_client, "no-rev-update", "Original")
+        r = test_client.put(
+            "/api/v1/pages/no-rev-update",
+            json={"content": "Updated"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 409
+        data = r.get_json()
+        assert "Revision required" in data["error"]
+        assert "current_revision" not in data
+
+    def test_update_empty_revision_409(self, test_client):
+        self._create_and_get_rev(test_client, "empty-rev", "Original")
+        r = test_client.put(
+            "/api/v1/pages/empty-rev",
+            json={"content": "Updated", "revision": ""},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 409
+        assert "Revision required" in r.get_json()["error"]
+
+    def test_update_wrong_revision_409(self, test_client):
+        self._create_and_get_rev(test_client, "wrong-rev", "Original")
+        r = test_client.put(
+            "/api/v1/pages/wrong-rev",
+            json={"content": "Updated", "revision": "deadbeef00000000"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 409
+        data = r.get_json()
+        assert "Revision mismatch" in data["error"]
+        assert "current_revision" in data
+
+    def test_update_short_revision_422(self, test_client):
+        self._create_and_get_rev(test_client, "short-rev", "Original")
+        r = test_client.put(
+            "/api/v1/pages/short-rev",
+            json={"content": "Updated", "revision": "abc"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "at least 7" in r.get_json()["error"]
+
+    def test_create_without_revision_succeeds(self, test_client):
+        """Creating a new page should work without a revision."""
+        r = test_client.put(
+            "/api/v1/pages/brand-new",
+            json={"content": "Fresh page"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 201
+        assert r.get_json()["created"] is True
 
     def test_delete_page(self, test_client):
         test_client.put(
@@ -475,15 +531,17 @@ class TestListPages:
 
 
 class TestHistory:
+    def _create_and_get_rev(self, client, path, content):
+        """Helper: create a page and return its revision SHA."""
+        client.put(f"/api/v1/pages/{path}", json={"content": content}, headers=AUTH_HEADERS)
+        r = client.get(f"/api/v1/pages/{path}", headers=AUTH_HEADERS)
+        return r.get_json()["revision"]
+
     def test_page_history(self, test_client):
+        rev = self._create_and_get_rev(test_client, "hist-page", "v1")
         test_client.put(
             "/api/v1/pages/hist-page",
-            json={"content": "v1"},
-            headers=AUTH_HEADERS,
-        )
-        test_client.put(
-            "/api/v1/pages/hist-page",
-            json={"content": "v2"},
+            json={"content": "v2", "revision": rev},
             headers=AUTH_HEADERS,
         )
         r = test_client.get("/api/v1/pages/hist-page/history", headers=AUTH_HEADERS)
@@ -501,12 +559,14 @@ class TestHistory:
         assert r.status_code == 404
 
     def test_history_limit(self, test_client):
-        for i in range(5):
-            test_client.put(
+        rev = self._create_and_get_rev(test_client, "multi-hist", "version 0")
+        for i in range(1, 5):
+            r = test_client.put(
                 "/api/v1/pages/multi-hist",
-                json={"content": f"version {i}"},
+                json={"content": f"version {i}", "revision": rev},
                 headers=AUTH_HEADERS,
             )
+            rev = r.get_json()["revision"]
         r = test_client.get("/api/v1/pages/multi-hist/history?limit=2", headers=AUTH_HEADERS)
         assert len(r.get_json()["history"]) == 2
 
@@ -625,9 +685,11 @@ class TestLinks:
         r = test_client.get("/api/v1/links/editable", headers=AUTH_HEADERS)
         assert "Oldtarget" in r.get_json()["links_to"]
 
+        r = test_client.get("/api/v1/pages/editable", headers=AUTH_HEADERS)
+        rev = r.get_json()["revision"]
         test_client.put(
             "/api/v1/pages/editable",
-            json={"content": "Links to [[NewTarget]]"},
+            json={"content": "Links to [[NewTarget]]", "revision": rev},
             headers=AUTH_HEADERS,
         )
         r = test_client.get("/api/v1/links/editable", headers=AUTH_HEADERS)
@@ -672,10 +734,17 @@ class TestChangelog:
         assert "pages_affected" in latest
 
     def test_changelog_limit(self, test_client):
-        for i in range(5):
+        test_client.put(
+            "/api/v1/pages/cl-limit-page",
+            json={"content": "v0"},
+            headers=AUTH_HEADERS,
+        )
+        for i in range(1, 5):
+            r = test_client.get("/api/v1/pages/cl-limit-page", headers=AUTH_HEADERS)
+            rev = r.get_json()["revision"]
             test_client.put(
                 "/api/v1/pages/cl-limit-page",
-                json={"content": f"v{i}"},
+                json={"content": f"v{i}", "revision": rev},
                 headers=AUTH_HEADERS,
             )
         r = test_client.get("/api/v1/changelog?limit=2", headers=AUTH_HEADERS)
@@ -697,7 +766,7 @@ class TestRevision:
 
         test_client.put(
             "/api/v1/pages/rev-page",
-            json={"content": "Updated content"},
+            json={"content": "Updated content", "revision": rev1},
             headers=AUTH_HEADERS,
         )
 

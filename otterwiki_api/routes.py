@@ -200,6 +200,25 @@ def put_page(path):
     author = get_author()
 
     is_new = not storage.exists(filename)
+
+    # Optimistic lock: require revision when overwriting an existing page
+    if not is_new:
+        revision = data.get("revision")
+        if not revision:
+            return jsonify({
+                "error": "Revision required when updating an existing page. "
+                         "Read the page first to get the current revision.",
+            }), 409
+        if len(revision) < 7:
+            return jsonify({"error": "revision must be at least 7 characters"}), 422
+        meta = storage.metadata(filename)
+        current_rev = meta.get("revision-full", "")
+        if not current_rev.startswith(revision):
+            return jsonify({
+                "error": "Revision mismatch: page has been modified since last read.",
+                "current_revision": current_rev,
+            }), 409
+
     action = "Create" if is_new else "Update"
     message = _commit_message(data, action, path)
 
