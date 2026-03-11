@@ -28,28 +28,15 @@ def get_author():
 
 
 def get_filename(pagepath):
-    """Convert a URL page path to the on-disk filename, respecting RETAIN_PAGE_NAME_CASE."""
-    app = _state["app"]
-    retain_case = app.config.get("RETAIN_PAGE_NAME_CASE", False) if app else False
-    p = pagepath if retain_case else pagepath.lower()
-    # Clean slashes
-    parts = [part for part in p.split("/") if part]
-    p = "/".join(parts)
-    if not p.endswith(".md"):
-        p = f"{p}.md"
-    return p
+    """Convert a URL page path to the on-disk filename. Delegates to otterwiki core."""
+    from otterwiki.helper import get_filename as _core
+    return _core(pagepath)
 
 
 def get_pagename(filepath):
-    """Derive display name from a filepath like 'some/page.md' -> 'Some/Page'."""
-    if filepath.endswith(".md"):
-        filepath = filepath[:-3]
-    parts = filepath.split("/")
-    app = _state["app"]
-    retain_case = app.config.get("RETAIN_PAGE_NAME_CASE", False) if app else False
-    if not retain_case:
-        parts = [p.title() for p in parts]
-    return "/".join(parts)
+    """Derive full display path from a filepath. Delegates to otterwiki core."""
+    from otterwiki.helper import get_pagename as _core
+    return _core(filepath, full=True)
 
 
 @api_bp.route("/health", methods=["GET"])
