@@ -116,6 +116,85 @@ class WikiLinkIndex:
                 if not self.incoming[target]:
                     del self.incoming[target]
 
+    def rewrite_links(self, content, old_target, new_target):
+        """Rewrite wikilinks in content that point to old_target so they point to new_target.
+
+        Preserves display text and anchors. Style-aware (handles LINKTITLE).
+        Returns the modified content.
+        """
+        old_normalized = self._normalize_target(old_target)
+        if not old_normalized:
+            return content
+
+        wikilink_style = self.config.get("WIKILINK_STYLE", "")
+        is_link_title = wikilink_style.upper().replace("_", "").strip() in [
+            "LINKTITLE",
+            "PAGENAMETITLE",
+        ]
+
+        def _replacer(m):
+            left, right = m.group(1), m.group(2)
+
+            if right:
+                # [[left|right]] — which side is the link depends on style
+                if is_link_title:
+                    link_part, display_part = left, right
+                else:
+                    display_part, link_part = left, right
+            else:
+                link_part = left
+                display_part = None
+
+            # Separate anchor from link
+            anchor = ""
+            raw_link = link_part
+            if "#" in raw_link:
+                raw_link, anchor = raw_link.split("#", 1)
+                anchor = "#" + anchor
+
+            if self._normalize_target(raw_link) != old_normalized:
+                return m.group(0)  # no match, leave unchanged
+
+            new_link = new_target + anchor
+
+            if display_part is not None:
+                if is_link_title:
+                    return f"[[{new_link}|{display_part}]]"
+                else:
+                    return f"[[{display_part}|{new_link}]]"
+            else:
+                return f"[[{new_link}]]"
+
+        return WIKILINK_RE.sub(_replacer, content)
+
+    def rename_page(self, old_filename, new_filename):
+        """Update the in-memory index after a page rename.
+
+        Moves outgoing links from old path to new path, and updates
+        all incoming references that pointed to old path.
+        """
+        old_path = self._page_path_from_filename(old_filename)
+        new_path = self._page_path_from_filename(new_filename)
+
+        # Move outgoing links
+        targets = self.outgoing.pop(old_path, set())
+        self.outgoing[new_path] = targets
+
+        # Update incoming: for each target this page links to,
+        # replace old_path with new_path in the source set
+        for target in targets:
+            if target in self.incoming:
+                self.incoming[target].discard(old_path)
+                self.incoming[target].add(new_path)
+
+        # Move incoming links that pointed to the old path
+        if old_path in self.incoming:
+            sources = self.incoming.pop(old_path)
+            if new_path in self.incoming:
+                self.incoming[new_path] |= sources
+            else:
+                self.incoming[new_path] = sources
+
     def get_links_for_page(self, page_path):
         """Get outgoing and incoming links for a page."""
         return {

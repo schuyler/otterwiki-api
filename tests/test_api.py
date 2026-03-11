@@ -771,3 +771,219 @@ class TestCommitMessages:
         r = test_client.get("/api/v1/pages/nopfx-msg/history", headers=AUTH_HEADERS)
         msg = r.get_json()["history"][0]["message"]
         assert msg == "Just a plain message"
+
+
+# --- Rename tests ---
+
+
+class TestRenamePage:
+    def test_basic_rename(self, test_client):
+        """Rename moves content to new path."""
+        test_client.put(
+            "/api/v1/pages/old-name",
+            json={"content": "Hello world"},
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.post(
+            "/api/v1/pages/old-name/rename",
+            json={"new_path": "new-name"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data["old_path"] == "Old-Name"
+        assert data["new_path"] == "New-Name"
+        assert data["revision"]
+        assert isinstance(data["updated_pages"], list)
+
+        # Old path gone, new path has content
+        r = test_client.get("/api/v1/pages/old-name", headers=AUTH_HEADERS)
+        assert r.status_code == 404
+        r = test_client.get("/api/v1/pages/new-name", headers=AUTH_HEADERS)
+        assert r.status_code == 200
+        assert r.get_json()["content"] == "Hello world"
+
+    def test_rename_rewrites_backreferences(self, test_client):
+        """Pages linking to old name have their wikilinks updated."""
+        test_client.put(
+            "/api/v1/pages/target",
+            json={"content": "I am the target"},
+            headers=AUTH_HEADERS,
+        )
+        test_client.put(
+            "/api/v1/pages/linker",
+            json={"content": "See [[Target]] for details"},
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.post(
+            "/api/v1/pages/target/rename",
+            json={"new_path": "new-target"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        data = r.get_json()
+        assert "Linker" in data["updated_pages"]
+
+        # Verify the linking page was rewritten
+        r = test_client.get("/api/v1/pages/linker", headers=AUTH_HEADERS)
+        content = r.get_json()["content"]
+        assert "[[New-Target]]" in content
+        assert "[[Target]]" not in content
+
+    def test_rename_preserves_display_text(self, test_client):
+        """Display text in [[Display|Link]] is preserved."""
+        test_client.put(
+            "/api/v1/pages/actors/iran",
+            json={"content": "Iran page"},
+            headers=AUTH_HEADERS,
+        )
+        test_client.put(
+            "/api/v1/pages/summary",
+            json={"content": "The [[Islamic Republic|Actors/Iran]] is a key actor"},
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.post(
+            "/api/v1/pages/actors/iran/rename",
+            json={"new_path": "actors/iran-islamic-republic"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+
+        r = test_client.get("/api/v1/pages/summary", headers=AUTH_HEADERS)
+        content = r.get_json()["content"]
+        assert "[[Islamic Republic|Actors/Iran-Islamic-Republic]]" in content
+
+    def test_rename_preserves_anchors(self, test_client):
+        """Anchors in wikilinks are preserved: [[Page#section]] -> [[NewPage#section]]."""
+        test_client.put(
+            "/api/v1/pages/topic",
+            json={"content": "# Section\nContent"},
+            headers=AUTH_HEADERS,
+        )
+        test_client.put(
+            "/api/v1/pages/referrer",
+            json={"content": "See [[Topic#section]] for details"},
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.post(
+            "/api/v1/pages/topic/rename",
+            json={"new_path": "new-topic"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+
+        r = test_client.get("/api/v1/pages/referrer", headers=AUTH_HEADERS)
+        content = r.get_json()["content"]
+        assert "[[New-Topic#section]]" in content
+
+    def test_rename_nonexistent_404(self, test_client):
+        r = test_client.post(
+            "/api/v1/pages/does-not-exist/rename",
+            json={"new_path": "whatever"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 404
+
+    def test_rename_target_exists_409(self, test_client):
+        test_client.put(
+            "/api/v1/pages/page-a",
+            json={"content": "A"},
+            headers=AUTH_HEADERS,
+        )
+        test_client.put(
+            "/api/v1/pages/page-b",
+            json={"content": "B"},
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.post(
+            "/api/v1/pages/page-a/rename",
+            json={"new_path": "page-b"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 409
+
+    def test_rename_same_path_422(self, test_client):
+        test_client.put(
+            "/api/v1/pages/same-page",
+            json={"content": "Content"},
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.post(
+            "/api/v1/pages/same-page/rename",
+            json={"new_path": "same-page"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "same" in r.get_json()["error"]
+
+    def test_rename_missing_new_path_422(self, test_client):
+        test_client.put(
+            "/api/v1/pages/some-page",
+            json={"content": "Content"},
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.post(
+            "/api/v1/pages/some-page/rename",
+            json={},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+
+    def test_rename_updates_link_index(self, test_client):
+        """After rename, the wikilink index reflects the new path."""
+        test_client.put(
+            "/api/v1/pages/indexed-page",
+            json={"content": "Links to [[Some Target]]"},
+            headers=AUTH_HEADERS,
+        )
+        test_client.post(
+            "/api/v1/pages/indexed-page/rename",
+            json={"new_path": "renamed-page"},
+            headers=AUTH_HEADERS,
+        )
+        # The renamed page's outgoing links should still be tracked
+        r = test_client.get("/api/v1/links/renamed-page", headers=AUTH_HEADERS)
+        data = r.get_json()
+        assert "Some Target" in data["links_to"]
+
+    def test_rename_atomic_single_commit(self, test_client):
+        """Rename + backreference updates happen in a single commit."""
+        test_client.put(
+            "/api/v1/pages/atomic-target",
+            json={"content": "Target page"},
+            headers=AUTH_HEADERS,
+        )
+        test_client.put(
+            "/api/v1/pages/atomic-linker",
+            json={"content": "See [[Atomic-Target]]"},
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.post(
+            "/api/v1/pages/atomic-target/rename",
+            json={"new_path": "atomic-renamed"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        rev = r.get_json()["revision"]
+
+        # Both the renamed page and the updated linker should share the same commit
+        r = test_client.get("/api/v1/pages/atomic-linker", headers=AUTH_HEADERS)
+        linker_rev = r.get_json()["last_commit"]["revision"]
+        assert linker_rev == rev
+
+    def test_rename_nested_path(self, test_client):
+        """Rename works with nested paths."""
+        test_client.put(
+            "/api/v1/pages/actors/old-actor",
+            json={"content": "Actor page"},
+            headers=AUTH_HEADERS,
+        )
+        r = test_client.post(
+            "/api/v1/pages/actors/old-actor/rename",
+            json={"new_path": "actors/new-actor"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        r = test_client.get("/api/v1/pages/actors/new-actor", headers=AUTH_HEADERS)
+        assert r.status_code == 200
+        assert r.get_json()["content"] == "Actor page"

@@ -1,10 +1,11 @@
 """API route handlers for /api/v1/."""
 
+import os
 from datetime import datetime, timezone
 
 from flask import jsonify, request
 
-from otterwiki.gitstorage import StorageNotFound
+from otterwiki.gitstorage import StorageError, StorageNotFound
 
 from otterwiki_api import api_bp, _state, get_filename, get_pagename, get_author
 from otterwiki_api.frontmatter import parse_frontmatter
@@ -330,6 +331,118 @@ def delete_page(path):
         index.remove_page(filename)
 
     return jsonify({"deleted": True, "path": get_pagename(filename)})
+
+
+# --- Rename ---
+
+@api_bp.route("/pages/<path:path>/rename", methods=["POST"])
+def rename_page(path):
+    """Rename a page and rewrite all backreferences atomically."""
+    storage = _state["storage"]
+    index = _state.get("wikilink_index")
+
+    old_filename = get_filename(path)
+    if not storage.exists(old_filename):
+        return jsonify({"error": f"Page not found: {path}"}), 404
+
+    data = request.get_json(silent=True)
+    if not data or "new_path" not in data:
+        return jsonify({"error": "Request body must include 'new_path' field"}), 422
+
+    new_path = data["new_path"].strip()
+    if not new_path:
+        return jsonify({"error": "new_path must not be empty"}), 422
+
+    new_filename = get_filename(new_path)
+    if old_filename == new_filename:
+        return jsonify({"error": "new_path is the same as the current path"}), 422
+
+    if storage.exists(new_filename):
+        return jsonify({"error": f"A page already exists at: {new_path}"}), 409
+
+    author = get_author()
+    message = _commit_message(data, "Rename", f"{path} -> {new_path}")
+
+    # --- Atomic rename + backreference rewrite ---
+    try:
+        # 1. git mv the page file (no commit yet)
+        storage.rename(old_filename, new_filename, no_commit=True)
+
+        # 2. Find and rewrite backreferences
+        updated_filenames = []  # track actual filenames for commit
+        updated_display = []    # track display paths for response
+        old_page_path = old_filename[:-3] if old_filename.endswith(".md") else old_filename
+        display_new_path = get_pagename(new_filename)
+
+        if index:
+            link_data = index.get_links_for_page(old_page_path)
+            backrefs = link_data.get("incoming", [])
+
+            for source_path in backrefs:
+                # Self-link: page was already git-mv'd, load from new location
+                if source_path == old_page_path:
+                    source_filename = new_filename
+                else:
+                    source_filename = source_path + ".md"
+                try:
+                    content = storage.load(source_filename)
+                except Exception:
+                    continue  # skip if page was deleted between lookup and load
+
+                new_content = index.rewrite_links(content, path, display_new_path)
+                if new_content == content:
+                    continue  # no actual link matches found
+
+                # Write updated content to disk and stage it
+                full_path = os.path.join(storage.path, source_filename)
+                dirname = os.path.dirname(full_path)
+                if dirname:
+                    os.makedirs(dirname, exist_ok=True)
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                storage.repo.index.add([source_filename])
+                updated_filenames.append(source_filename)
+                updated_display.append(get_pagename(source_filename))
+
+        # 3. Single atomic commit
+        all_files = [old_filename, new_filename] + updated_filenames
+        storage.commit(all_files, message, author, no_add=True)
+
+    except StorageError as e:
+        return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        # Roll back staged changes on unexpected failure
+        try:
+            storage.repo.git.reset("HEAD")
+            storage.repo.git.checkout("--", ".")
+        except Exception:
+            pass
+        return jsonify({"error": f"Rename failed: {e}"}), 500
+
+    # 4. Update the wikilink index
+    if index:
+        index.rename_page(old_filename, new_filename)
+        for source_filename in updated_filenames:
+            try:
+                content = storage.load(source_filename)
+                index.update_page(source_filename, content)
+            except Exception:
+                pass
+
+    # 5. Get new revision
+    rev_full = ""
+    try:
+        meta = storage.metadata(new_filename)
+        rev_full = meta.get("revision-full", "")
+    except Exception:
+        pass
+
+    return jsonify({
+        "old_path": get_pagename(old_filename),
+        "new_path": display_new_path,
+        "revision": rev_full,
+        "updated_pages": updated_display,
+    })
 
 
 # --- History ---
