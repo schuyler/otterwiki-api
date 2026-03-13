@@ -2,6 +2,7 @@
 
 import os
 from datetime import datetime, timezone
+from urllib.parse import unquote
 
 from flask import jsonify, request
 
@@ -134,6 +135,7 @@ def list_pages():
 @api_bp.route("/pages/<path:path>", methods=["GET"])
 def get_page(path):
     """PRD: returns {name, path, content (raw with frontmatter), frontmatter, links_to, linked_from, revision, last_commit}"""
+    path = unquote(path)
     storage = _state["storage"]
     filename = get_filename(path)
 
@@ -189,6 +191,7 @@ def get_page(path):
 @api_bp.route("/pages/<path:path>", methods=["PUT"])
 def put_page(path):
     """PRD: returns {name, path, revision, created}"""
+    path = unquote(path)
     storage = _state["storage"]
     filename = get_filename(path)
     data = request.get_json(silent=True)
@@ -254,6 +257,7 @@ def put_page(path):
 @api_bp.route("/pages/<path:path>", methods=["PATCH"])
 def patch_page(path):
     """Edit-in-place with optimistic locking. Body: {revision, old_string, new_string, commit_message?}."""
+    path = unquote(path)
     storage = _state["storage"]
     filename = get_filename(path)
     data = request.get_json(silent=True)
@@ -332,6 +336,7 @@ def patch_page(path):
 
 @api_bp.route("/pages/<path:path>", methods=["DELETE"])
 def delete_page(path):
+    path = unquote(path)
     storage = _state["storage"]
     filename = get_filename(path)
 
@@ -357,6 +362,7 @@ def delete_page(path):
 @api_bp.route("/pages/<path:path>/rename", methods=["POST"])
 def rename_page(path):
     """Rename a page and rewrite all backreferences atomically."""
+    path = unquote(path)
     storage = _state["storage"]
     index = _state.get("wikilink_index")
 
@@ -469,6 +475,7 @@ def rename_page(path):
 @api_bp.route("/pages/<path:path>/history", methods=["GET"])
 def page_history(path):
     """PRD: returns array of {revision, author, date, message}."""
+    path = unquote(path)
     storage = _state["storage"]
     filename = get_filename(path)
 
@@ -507,6 +514,7 @@ def search():
 @api_bp.route("/links/<path:path>", methods=["GET"])
 def page_links(path):
     """PRD: returns {links_to: [...], linked_from: [...]}."""
+    path = unquote(path)
     index = _state.get("wikilink_index")
     if not index:
         return jsonify({"error": "WikiLink index not available"}), 500
