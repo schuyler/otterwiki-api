@@ -33,6 +33,30 @@ def get_filename(pagepath):
     return _core(pagepath)
 
 
+def resolve_filename(pagepath):
+    """Find the actual on-disk filename for a page path.
+
+    Tries the normalized filename first (e.g. spaces→underscores), then
+    falls back to the literal path. This handles migration cases where
+    files were created before normalization was enabled.
+    """
+    from otterwiki.util import clean_slashes
+
+    storage = _state["storage"]
+    normalized = get_filename(pagepath)
+    if storage.exists(normalized):
+        return normalized
+
+    # Fallback: try the literal path without normalization
+    literal = clean_slashes(pagepath)
+    if not literal.endswith(".md"):
+        literal = f"{literal}.md"
+    if storage.exists(literal):
+        return literal
+
+    return normalized  # Return normalized even if not found (caller handles 404)
+
+
 def get_pagename(filepath):
     """Derive full display path from a filepath. Delegates to otterwiki core."""
     from otterwiki.helper import get_pagename as _core

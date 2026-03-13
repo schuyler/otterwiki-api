@@ -8,7 +8,7 @@ from flask import jsonify, request
 
 from otterwiki.gitstorage import StorageError, StorageNotFound
 
-from otterwiki_api import api_bp, _state, get_filename, get_pagename, get_author
+from otterwiki_api import api_bp, _state, get_filename, resolve_filename, get_pagename, get_author
 from otterwiki_api.frontmatter import parse_frontmatter
 from otterwiki_api.search import search_pages
 
@@ -137,7 +137,7 @@ def get_page(path):
     """PRD: returns {name, path, content (raw with frontmatter), frontmatter, links_to, linked_from, revision, last_commit}"""
     path = unquote(path)
     storage = _state["storage"]
-    filename = get_filename(path)
+    filename = resolve_filename(path)
 
     revision = request.args.get("revision")
 
@@ -259,7 +259,7 @@ def patch_page(path):
     """Edit-in-place with optimistic locking. Body: {revision, old_string, new_string, commit_message?}."""
     path = unquote(path)
     storage = _state["storage"]
-    filename = get_filename(path)
+    filename = resolve_filename(path)
     data = request.get_json(silent=True)
 
     if not data:
@@ -338,7 +338,7 @@ def patch_page(path):
 def delete_page(path):
     path = unquote(path)
     storage = _state["storage"]
-    filename = get_filename(path)
+    filename = resolve_filename(path)
 
     if not storage.exists(filename):
         return jsonify({"error": f"Page not found: {path}"}), 404
@@ -366,7 +366,7 @@ def rename_page(path):
     storage = _state["storage"]
     index = _state.get("wikilink_index")
 
-    old_filename = get_filename(path)
+    old_filename = resolve_filename(path)
     if not storage.exists(old_filename):
         return jsonify({"error": f"Page not found: {path}"}), 404
 
@@ -477,7 +477,7 @@ def page_history(path):
     """PRD: returns array of {revision, author, date, message}."""
     path = unquote(path)
     storage = _state["storage"]
-    filename = get_filename(path)
+    filename = resolve_filename(path)
 
     if not storage.exists(filename):
         return jsonify({"error": f"Page not found: {path}"}), 404
