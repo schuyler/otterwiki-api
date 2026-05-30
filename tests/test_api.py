@@ -1,5 +1,6 @@
 """Tests for the otterwiki_api REST API plugin."""
 
+import base64
 import os
 import pytest
 
@@ -1056,3 +1057,188 @@ class TestRenamePage:
         r = test_client.get("/api/v1/pages/actors/new-actor", headers=AUTH_HEADERS)
         assert r.status_code == 200
         assert r.get_json()["content"] == "Actor page"
+
+
+# --- Attachment tests ---
+
+
+class TestAttachments:
+    def _create_page(self, client, path):
+        """Helper: create a page and return the response."""
+        return client.put(
+            f"/api/v1/pages/{path}",
+            json={"content": f"Page for {path}"},
+            headers=AUTH_HEADERS,
+        )
+
+    def _upload_attachment(self, client, page_path, filename, content_bytes, commit_message=None):
+        """Helper: upload an attachment. Returns response."""
+        payload = {
+            "filename": filename,
+            "content": base64.b64encode(content_bytes).decode(),
+        }
+        if commit_message:
+            payload["commit_message"] = commit_message
+        return client.post(
+            f"/api/v1/pages/{page_path}/attachments",
+            json=payload,
+            headers=AUTH_HEADERS,
+        )
+
+    def test_list_attachments_empty(self, test_client):
+        """GET attachments on a page with no attachments returns empty list."""
+        self._create_page(test_client, "attach-test-empty")
+        r = test_client.get(
+            "/api/v1/pages/attach-test-empty/attachments",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data["attachments"] == []
+        assert data["total"] == 0
+
+    def test_list_attachments_nonexistent_page(self, test_client):
+        """GET attachments for a non-existent page returns 404."""
+        r = test_client.get(
+            "/api/v1/pages/no-such-attach-page/attachments",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 404
+
+    def test_upload_and_list(self, test_client):
+        """Upload an attachment, then verify it appears in the list."""
+        self._create_page(test_client, "attach-test-upload")
+        content = b"Hello attachment world"
+        r = self._upload_attachment(
+            test_client, "attach-test-upload", "hello.txt", content
+        )
+        assert r.status_code == 201
+        data = r.get_json()
+        assert data["filename"] == "hello.txt"
+        assert data["path"]
+        assert data["size"] == len(content)
+        assert data["mime_type"]
+
+        # Verify it appears in the listing
+        r = test_client.get(
+            "/api/v1/pages/attach-test-upload/attachments",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data["total"] >= 1
+        filenames = [a["filename"] for a in data["attachments"]]
+        assert "hello.txt" in filenames
+
+    def test_upload_nonexistent_page_404(self, test_client):
+        """POST attachment to a page that doesn't exist returns 404."""
+        content = base64.b64encode(b"data").decode()
+        r = test_client.post(
+            "/api/v1/pages/no-such-attach-page/attachments",
+            json={"filename": "file.txt", "content": content},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 404
+
+    def test_upload_missing_fields_422(self, test_client):
+        """POST with only filename (no content) returns 422."""
+        self._create_page(test_client, "attach-test-missing")
+        r = test_client.post(
+            "/api/v1/pages/attach-test-missing/attachments",
+            json={"filename": "file.txt"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+
+    def test_upload_invalid_base64_422(self, test_client):
+        """POST with invalid base64 content returns 422."""
+        self._create_page(test_client, "attach-test-bad64")
+        r = test_client.post(
+            "/api/v1/pages/attach-test-bad64/attachments",
+            json={"filename": "file.txt", "content": "not-valid-base64!!!"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+
+    def test_upload_oversized_422(self, test_client):
+        """POST with content decoded to >10MB returns 422."""
+        self._create_page(test_client, "attach-test-oversized")
+        # Encode 11MB of zeros
+        big_content = base64.b64encode(b"\x00" * (11 * 1024 * 1024)).decode()
+        r = test_client.post(
+            "/api/v1/pages/attach-test-oversized/attachments",
+            json={"filename": "big.bin", "content": big_content},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "too large" in r.get_json()["error"].lower()
+
+    def test_download_attachment(self, test_client):
+        """Upload then download an attachment; verify base64 roundtrip."""
+        self._create_page(test_client, "attach-test-download")
+        original = b"Binary content: \x00\x01\x02\xff"
+        self._upload_attachment(
+            test_client, "attach-test-download", "data.bin", original
+        )
+        r = test_client.get(
+            "/api/v1/pages/attach-test-download/attachments/data.bin",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        data = r.get_json()
+        decoded = base64.b64decode(data["content"])
+        assert decoded == original
+
+    def test_download_nonexistent_404(self, test_client):
+        """GET download for a non-existent attachment returns 404."""
+        self._create_page(test_client, "attach-test-dl404")
+        r = test_client.get(
+            "/api/v1/pages/attach-test-dl404/attachments/nope.txt",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 404
+
+    def test_delete_attachment(self, test_client):
+        """Upload then delete an attachment; verify list is empty."""
+        self._create_page(test_client, "attach-test-delete")
+        self._upload_attachment(
+            test_client, "attach-test-delete", "deleteme.txt", b"bye bye"
+        )
+        r = test_client.delete(
+            "/api/v1/pages/attach-test-delete/attachments/deleteme.txt",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data["deleted"] is True
+        assert data["filename"] == "deleteme.txt"
+
+        # Verify it's gone from the list
+        r = test_client.get(
+            "/api/v1/pages/attach-test-delete/attachments",
+            headers=AUTH_HEADERS,
+        )
+        assert r.get_json()["total"] == 0
+
+    def test_delete_nonexistent_404(self, test_client):
+        """DELETE a non-existent attachment returns 404."""
+        self._create_page(test_client, "attach-test-del404")
+        r = test_client.delete(
+            "/api/v1/pages/attach-test-del404/attachments/ghost.txt",
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 404
+
+    def test_custom_commit_message(self, test_client):
+        """Upload with commit_message; verify it appears in changelog."""
+        self._create_page(test_client, "attach-test-commitmsg")
+        self._upload_attachment(
+            test_client,
+            "attach-test-commitmsg",
+            "doc.pdf",
+            b"%PDF-fake",
+            commit_message="[mcp] uploaded doc.pdf",
+        )
+        r = test_client.get("/api/v1/changelog", headers=AUTH_HEADERS)
+        messages = [e["message"] for e in r.get_json()["entries"]]
+        assert "[mcp] uploaded doc.pdf" in messages

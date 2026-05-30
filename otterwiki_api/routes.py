@@ -1,12 +1,16 @@
 """API route handlers for /api/v1/."""
 
+import base64
 import os
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
 from flask import jsonify, request
+from werkzeug.utils import secure_filename
 
 from otterwiki.gitstorage import StorageError, StorageNotFound
+from otterwiki.helper import get_attachment_directoryname
+from otterwiki.util import guess_mimetype
 
 from otterwiki_api import api_bp, _state, get_filename, resolve_filename, get_pagename, get_author
 from otterwiki_api.frontmatter import parse_frontmatter
@@ -573,3 +577,175 @@ def changelog():
         entries.append(e)
 
     return jsonify({"entries": entries, "total": len(entries)})
+
+
+# --- Attachments ---
+
+MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+@api_bp.route("/pages/<path:path>/attachments", methods=["GET"])
+def list_attachments(path: str):
+    """List files attached to a wiki page.
+
+    GET /api/v1/pages/<path>/attachments
+
+    Returns ``{attachments: [{filename, size, mime_type, last_modified}], total, path}``.
+    Returns an empty list if the page has no attachment directory.
+    """
+    path = unquote(path)
+    storage = _state["storage"]
+    filename = resolve_filename(path)
+
+    if not storage.exists(filename):
+        return jsonify({"error": f"Page not found: {path}"}), 404
+
+    attach_dir = get_attachment_directoryname(filename)
+    if not storage.isdir(attach_dir):
+        return jsonify({"attachments": [], "total": 0, "path": get_pagename(filename)})
+
+    files, _ = storage.list(attach_dir, depth=0)
+    attachments = []
+    for f in files:
+        if f.endswith(".md"):
+            continue
+        filepath = os.path.join(attach_dir, f)
+        try:
+            file_size = storage.size(filepath)
+        except Exception:
+            file_size = 0
+        mime = guess_mimetype(filepath)
+        last_modified = None
+        try:
+            meta = storage.metadata(filepath)
+            if meta.get("datetime"):
+                last_modified = meta["datetime"].isoformat()
+        except Exception:
+            pass
+        attachments.append({
+            "filename": f,
+            "size": file_size,
+            "mime_type": mime,
+            "last_modified": last_modified,
+        })
+
+    return jsonify({
+        "attachments": attachments,
+        "total": len(attachments),
+        "path": get_pagename(filename),
+    })
+
+
+@api_bp.route("/pages/<path:path>/attachments", methods=["POST"])
+def upload_attachment(path: str):
+    """Upload a file attachment to a wiki page.
+
+    POST /api/v1/pages/<path>/attachments
+
+    Body: ``{filename: str, content: str (base64), commit_message?: str}``
+    Returns 201 with ``{filename, path, size, mime_type}`` on success.
+    Rejects files larger than MAX_ATTACHMENT_SIZE (10 MB). The page must exist.
+    Filename is sanitized via werkzeug secure_filename.
+    """
+    path = unquote(path)
+    storage = _state["storage"]
+    data = request.get_json(silent=True)
+
+    if not data or "filename" not in data or "content" not in data:
+        return jsonify({"error": "Request body must include 'filename' and 'content' fields"}), 422
+
+    try:
+        file_bytes = base64.b64decode(data["content"])
+    except Exception:
+        return jsonify({"error": "Invalid base64 content"}), 422
+
+    if len(file_bytes) > MAX_ATTACHMENT_SIZE:
+        return jsonify({"error": f"Attachment too large (max {MAX_ATTACHMENT_SIZE // (1024 * 1024)}MB)"}), 422
+
+    safe_name = secure_filename(data["filename"])
+    if not safe_name:
+        return jsonify({"error": "Invalid filename"}), 422
+
+    filename = resolve_filename(path)
+    if not storage.exists(filename):
+        return jsonify({"error": f"Page not found: {path}"}), 404
+
+    attach_dir = get_attachment_directoryname(filename)
+    filepath = os.path.join(attach_dir, safe_name)
+    message = _commit_message(data, "Attach", safe_name)
+    storage.store(filepath, file_bytes, message=message, author=get_author(), mode="wb")
+
+    return jsonify({
+        "filename": safe_name,
+        "path": get_pagename(filename),
+        "size": len(file_bytes),
+        "mime_type": guess_mimetype(safe_name),
+    }), 201
+
+
+@api_bp.route("/pages/<path:path>/attachments/<path:filename>", methods=["GET"])
+def download_attachment(path: str, filename: str):
+    """Download a file attachment from a wiki page.
+
+    GET /api/v1/pages/<path>/attachments/<filename>
+
+    Returns ``{filename, content (base64), size, mime_type}``.
+    Both the page and the attachment file must exist.
+    """
+    path = unquote(path)
+    filename = unquote(filename)
+    storage = _state["storage"]
+
+    page_filename = resolve_filename(path)
+    if not storage.exists(page_filename):
+        return jsonify({"error": f"Page not found: {path}"}), 404
+
+    attach_dir = get_attachment_directoryname(page_filename)
+    filepath = os.path.join(attach_dir, secure_filename(filename))
+
+    if not storage.exists(filepath):
+        return jsonify({"error": f"Attachment not found: {filename}"}), 404
+
+    try:
+        file_bytes = storage.load(filepath, mode="rb")
+    except StorageNotFound:
+        return jsonify({"error": f"Attachment not found: {filename}"}), 404
+
+    return jsonify({
+        "filename": secure_filename(filename),
+        "content": base64.b64encode(file_bytes).decode("ascii"),
+        "size": len(file_bytes),
+        "mime_type": guess_mimetype(filepath),
+    })
+
+
+@api_bp.route("/pages/<path:path>/attachments/<path:filename>", methods=["DELETE"])
+def delete_attachment(path: str, filename: str):
+    """Delete a file attachment from a wiki page.
+
+    DELETE /api/v1/pages/<path>/attachments/<filename>
+
+    Optional body: ``{commit_message?: str}``
+    Returns ``{deleted: true, filename}`` on success.
+    Both the page and the attachment file must exist.
+    """
+    path = unquote(path)
+    filename = unquote(filename)
+    storage = _state["storage"]
+
+    page_filename = resolve_filename(path)
+    if not storage.exists(page_filename):
+        return jsonify({"error": f"Page not found: {path}"}), 404
+
+    attach_dir = get_attachment_directoryname(page_filename)
+    safe_name = secure_filename(filename)
+    filepath = os.path.join(attach_dir, safe_name)
+
+    if not storage.exists(filepath):
+        return jsonify({"error": f"Attachment not found: {filename}"}), 404
+
+    data = request.get_json(silent=True)
+    message = _commit_message(data, "Delete attachment", safe_name)
+    storage.delete(filepath, message=message, author=get_author())
+
+    return jsonify({"deleted": True, "filename": safe_name})
