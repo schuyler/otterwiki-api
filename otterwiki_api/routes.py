@@ -403,35 +403,43 @@ def rename_page(path):
         old_page_path = old_filename[:-3] if old_filename.endswith(".md") else old_filename
         display_new_path = get_pagename(new_filename)
 
-        if index:
-            link_data = index.get_links_for_page(old_page_path)
-            backrefs = link_data.get("incoming", [])
+        # 2b. Scan all pages directly for backreferences
+        # The in-memory index is unreliable in multi-tenant Gunicorn workers,
+        # so we scan all pages in the current storage directly.
+        from otterwiki_api.wikilinks import extract_links, rewrite_links as rewrite_wikilinks
 
-            for source_path in backrefs:
-                # Self-link: page was already git-mv'd, load from new location
-                if source_path == old_page_path:
-                    source_filename = new_filename
-                else:
-                    source_filename = source_path + ".md"
-                try:
-                    content = storage.load(source_filename)
-                except Exception:
-                    continue  # skip if page was deleted between lookup and load
+        config = _state["app"].config if _state.get("app") else {}
+        files, _ = storage.list()
+        for filename in files:
+            if not filename.endswith(".md"):
+                continue
+            # The renamed page was already git-mv'd, load from new location
+            if filename == old_filename:
+                source_filename = new_filename
+            else:
+                source_filename = filename
+            try:
+                content = storage.load(source_filename)
+            except Exception:
+                continue
 
-                new_content = index.rewrite_links(content, path, display_new_path)
-                if new_content == content:
-                    continue  # no actual link matches found
+            targets = extract_links(content, config)
+            if old_page_path not in targets:
+                continue
 
-                # Write updated content to disk and stage it
-                full_path = os.path.join(storage.path, source_filename)
-                dirname = os.path.dirname(full_path)
-                if dirname:
-                    os.makedirs(dirname, exist_ok=True)
-                with open(full_path, "w", encoding="utf-8") as f:
-                    f.write(new_content)
-                storage.repo.index.add([source_filename])
-                updated_filenames.append(source_filename)
-                updated_display.append(get_pagename(source_filename))
+            new_content = rewrite_wikilinks(content, path, display_new_path, config)
+            if new_content == content:
+                continue
+
+            full_path = os.path.join(storage.path, source_filename)
+            dirname = os.path.dirname(full_path)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            storage.repo.index.add([source_filename])
+            updated_filenames.append(source_filename)
+            updated_display.append(get_pagename(source_filename))
 
         # 3. Single atomic commit
         all_files = [old_filename, new_filename] + updated_filenames
@@ -448,15 +456,9 @@ def rename_page(path):
             pass
         return jsonify({"error": f"Rename failed: {e}"}), 500
 
-    # 4. Update the wikilink index
+    # 4. Update the wikilink index (partial — for /links endpoint correctness)
     if index:
         index.rename_page(old_filename, new_filename)
-        for source_filename in updated_filenames:
-            try:
-                content = storage.load(source_filename)
-                index.update_page(source_filename, content)
-            except Exception:
-                pass
 
     # 5. Get new revision
     rev_full = ""

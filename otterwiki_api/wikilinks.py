@@ -7,6 +7,96 @@ import re
 WIKILINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]")
 
 
+def normalize_target(target, config):
+    """Normalize a wikilink target to a page path."""
+    target = target.strip()
+    if target.startswith("/"):
+        target = target[1:]
+    if "#" in target:
+        target = target.split("#")[0]
+    if not target:
+        return None
+    retain_case = config.get("RETAIN_PAGE_NAME_CASE", False)
+    if not retain_case:
+        target = target.lower()
+    return target
+
+
+def extract_links(content, config):
+    """Extract wikilink targets from markdown content."""
+    targets = set()
+    wikilink_style = config.get("WIKILINK_STYLE", "")
+    is_link_title = wikilink_style.upper().replace("_", "").strip() in [
+        "LINKTITLE",
+        "PAGENAMETITLE",
+    ]
+
+    for m in WIKILINK_RE.finditer(content):
+        left, right = m.group(1), m.group(2)
+        if right:
+            if is_link_title:
+                link = left
+            else:
+                link = right
+        else:
+            link = left
+
+        normalized = normalize_target(link, config)
+        if normalized:
+            targets.add(normalized)
+    return targets
+
+
+def rewrite_links(content, old_target, new_target, config):
+    """Rewrite wikilinks in content that point to old_target so they point to new_target.
+
+    Preserves display text and anchors. Style-aware (handles LINKTITLE).
+    Returns the modified content.
+    """
+    old_normalized = normalize_target(old_target, config)
+    if not old_normalized:
+        return content
+
+    wikilink_style = config.get("WIKILINK_STYLE", "")
+    is_link_title = wikilink_style.upper().replace("_", "").strip() in [
+        "LINKTITLE",
+        "PAGENAMETITLE",
+    ]
+
+    def _replacer(m):
+        left, right = m.group(1), m.group(2)
+
+        if right:
+            if is_link_title:
+                link_part, display_part = left, right
+            else:
+                display_part, link_part = left, right
+        else:
+            link_part = left
+            display_part = None
+
+        anchor = ""
+        raw_link = link_part
+        if "#" in raw_link:
+            raw_link, anchor = raw_link.split("#", 1)
+            anchor = "#" + anchor
+
+        if normalize_target(raw_link, config) != old_normalized:
+            return m.group(0)  # no match, leave unchanged
+
+        new_link = new_target + anchor
+
+        if display_part is not None:
+            if is_link_title:
+                return f"[[{new_link}|{display_part}]]"
+            else:
+                return f"[[{display_part}|{new_link}]]"
+        else:
+            return f"[[{new_link}]]"
+
+    return WIKILINK_RE.sub(_replacer, content)
+
+
 class WikiLinkIndex:
     """In-memory index of wikilinks across all pages."""
 
@@ -20,43 +110,11 @@ class WikiLinkIndex:
 
     def _normalize_target(self, target):
         """Normalize a wikilink target to a page path."""
-        target = target.strip()
-        if target.startswith("/"):
-            target = target[1:]
-        # Remove anchor fragments
-        if "#" in target:
-            target = target.split("#")[0]
-        if not target:
-            return None
-        retain_case = self.config.get("RETAIN_PAGE_NAME_CASE", False)
-        if not retain_case:
-            target = target.lower()
-        return target
+        return normalize_target(target, self.config)
 
     def _extract_links(self, content):
         """Extract wikilink targets from markdown content."""
-        targets = set()
-        wikilink_style = self.config.get("WIKILINK_STYLE", "")
-        is_link_title = wikilink_style.upper().replace("_", "").strip() in [
-            "LINKTITLE",
-            "PAGENAMETITLE",
-        ]
-
-        for m in WIKILINK_RE.finditer(content):
-            left, right = m.group(1), m.group(2)
-            if right:
-                # [[left|right]] - which is the link depends on style
-                if is_link_title:
-                    link = left
-                else:
-                    link = right
-            else:
-                link = left
-
-            normalized = self._normalize_target(link)
-            if normalized:
-                targets.add(normalized)
-        return targets
+        return extract_links(content, self.config)
 
     def _page_path_from_filename(self, filename):
         """Convert 'some/page.md' to 'some/page'."""
@@ -122,50 +180,7 @@ class WikiLinkIndex:
         Preserves display text and anchors. Style-aware (handles LINKTITLE).
         Returns the modified content.
         """
-        old_normalized = self._normalize_target(old_target)
-        if not old_normalized:
-            return content
-
-        wikilink_style = self.config.get("WIKILINK_STYLE", "")
-        is_link_title = wikilink_style.upper().replace("_", "").strip() in [
-            "LINKTITLE",
-            "PAGENAMETITLE",
-        ]
-
-        def _replacer(m):
-            left, right = m.group(1), m.group(2)
-
-            if right:
-                # [[left|right]] — which side is the link depends on style
-                if is_link_title:
-                    link_part, display_part = left, right
-                else:
-                    display_part, link_part = left, right
-            else:
-                link_part = left
-                display_part = None
-
-            # Separate anchor from link
-            anchor = ""
-            raw_link = link_part
-            if "#" in raw_link:
-                raw_link, anchor = raw_link.split("#", 1)
-                anchor = "#" + anchor
-
-            if self._normalize_target(raw_link) != old_normalized:
-                return m.group(0)  # no match, leave unchanged
-
-            new_link = new_target + anchor
-
-            if display_part is not None:
-                if is_link_title:
-                    return f"[[{new_link}|{display_part}]]"
-                else:
-                    return f"[[{display_part}|{new_link}]]"
-            else:
-                return f"[[{new_link}]]"
-
-        return WIKILINK_RE.sub(_replacer, content)
+        return rewrite_links(content, old_target, new_target, self.config)
 
     def rename_page(self, old_filename, new_filename):
         """Update the in-memory index after a page rename.

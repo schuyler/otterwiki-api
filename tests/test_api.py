@@ -1058,6 +1058,54 @@ class TestRenamePage:
         assert r.status_code == 200
         assert r.get_json()["content"] == "Actor page"
 
+    def test_rename_rewrites_backrefs_without_index(self, test_client):
+        """Backreferences are rewritten even when wikilink_index is None.
+
+        This simulates the multi-tenant production scenario where Gunicorn
+        workers have an empty/stale index.
+        """
+        from otterwiki_api import _state
+
+        saved_index = _state.get("wikilink_index")
+        _state["wikilink_index"] = None
+        try:
+            test_client.put(
+                "/api/v1/pages/target-page",
+                json={"content": "I am the target"},
+                headers=AUTH_HEADERS,
+            )
+            test_client.put(
+                "/api/v1/pages/linker-page",
+                json={"content": "See [[Target-Page]] for details"},
+                headers=AUTH_HEADERS,
+            )
+            test_client.put(
+                "/api/v1/pages/another-linker",
+                json={"content": "Also check [[Target-Page]] and [[Other]]"},
+                headers=AUTH_HEADERS,
+            )
+
+            r = test_client.post(
+                "/api/v1/pages/target-page/rename",
+                json={"new_path": "renamed-target"},
+                headers=AUTH_HEADERS,
+            )
+            assert r.status_code == 200
+            data = r.get_json()
+            assert sorted(data["updated_pages"]) == ["Another-Linker", "Linker-Page"]
+
+            # Verify linking pages were rewritten
+            r = test_client.get("/api/v1/pages/linker-page", headers=AUTH_HEADERS)
+            assert "[[Renamed-Target]]" in r.get_json()["content"]
+            assert "[[Target-Page]]" not in r.get_json()["content"]
+
+            r = test_client.get("/api/v1/pages/another-linker", headers=AUTH_HEADERS)
+            content = r.get_json()["content"]
+            assert "[[Renamed-Target]]" in content
+            assert "[[Other]]" in content  # unrelated link preserved
+        finally:
+            _state["wikilink_index"] = saved_index
+
 
 # --- Attachment tests ---
 
