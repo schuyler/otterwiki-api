@@ -31,6 +31,14 @@ def create_app(tmpdir):
     os.environ["OTTERWIKI_SETTINGS"] = settings_cfg
     from otterwiki.server import app, db, mail, storage
 
+    # Simulate a production deployment where Flask-WTF CSRF protection is
+    # enabled globally. The API must remain usable (API-key auth) while
+    # browser routes keep CSRF enforcement.
+    if not app.extensions.get("csrf"):
+        from flask_wtf import CSRFProtect
+
+        CSRFProtect(app)
+
     app._otterwiki_tempdir = storage.path
     app.storage = storage
     app.test_mail = mail

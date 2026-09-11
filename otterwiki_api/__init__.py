@@ -27,6 +27,21 @@ def get_author():
     return (name, email)
 
 
+def _exempt_api_from_csrf(app):
+    """Exempt the API blueprint from Flask-WTF CSRF protection, if any.
+
+    The API is a machine-to-machine JSON interface authenticated by a
+    Bearer API key, which is its trust boundary. Browser-style CSRF
+    tokens do not apply, so when the host OtterWiki deployment enables
+    global CSRF protection the API blueprint must be exempted or every
+    write (POST/PUT/PATCH/DELETE) fails with 400 "The CSRF token is
+    missing". Browser routes keep CSRF enforcement untouched.
+    """
+    csrf = app.extensions.get("csrf")
+    if csrf is not None:
+        csrf.exempt(api_bp)
+
+
 def get_filename(pagepath):
     """Convert a URL page path to the on-disk filename. Delegates to otterwiki core."""
     from otterwiki.helper import get_filename as _core
@@ -80,6 +95,19 @@ class OtterwikiApiPlugin:
         import otterwiki_api.routes  # noqa: F401
 
         app.register_blueprint(api_bp)
+
+        # Exempt the API from CSRF protection. Handle both
+        # initialization orders: if the host app already has Flask-WTF
+        # CSRF active, exempt now; otherwise register a defensive hook
+        # so the exemption is applied on the first request in case CSRF
+        # is initialized after plugin setup (e.g. in tests, or in host
+        # versions that wire CSRFProtect after importing otterwiki.server
+        # where this setup hook runs at import time).
+        _exempt_api_from_csrf(app)
+        if app.extensions.get("csrf") is None:
+            @app.before_request
+            def _late_csrf_exempt():
+                _exempt_api_from_csrf(app)
 
         # Build wikilink index after all pages are available
         from otterwiki_api.wikilinks import WikiLinkIndex

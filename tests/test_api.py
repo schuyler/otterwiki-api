@@ -1290,3 +1290,45 @@ class TestAttachments:
         r = test_client.get("/api/v1/changelog", headers=AUTH_HEADERS)
         messages = [e["message"] for e in r.get_json()["entries"]]
         assert "[mcp] uploaded doc.pdf" in messages
+
+# --- CSRF coexistence tests ---
+#
+# conftest enables global Flask-WTF CSRF protection to simulate a
+# production deployment. The API (Bearer API key auth) must work
+# without CSRF tokens, while browser routes must keep enforcing them.
+
+
+class TestCSRF:
+    def test_api_write_without_csrf_token(self, test_client):
+        """API-key-authenticated write succeeds without a CSRF token."""
+        r = test_client.put(
+            "/api/v1/pages/csrf-test",
+            json={"content": "hello"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 201
+
+    def test_api_write_without_api_key_still_401(self, test_client):
+        """CSRF exemption does not bypass API-key auth: no key -> 401."""
+        r = test_client.put(
+            "/api/v1/pages/csrf-noauth",
+            json={"content": "hello"},
+        )
+        assert r.status_code == 401
+
+    def test_browser_post_still_requires_csrf(self, test_client):
+        """Browser routes keep CSRF enforcement (not disabled globally)."""
+        r = test_client.post("/-/housekeeping", data={})
+        assert r.status_code == 400
+
+    def test_exempt_applied_when_csrf_active_at_setup(self):
+        """Immediate path: CSRF already active at setup() -> exempted."""
+        from flask import Flask
+        from flask_wtf import CSRFProtect
+        from otterwiki_api import _exempt_api_from_csrf, api_bp
+
+        app = Flask(__name__)
+        app.secret_key = "test"
+        csrf = CSRFProtect(app)
+        _exempt_api_from_csrf(app)
+        assert api_bp in csrf._exempt_blueprints
