@@ -16,6 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest",
+    # Tests simulate a host deployment with global Flask-WTF CSRF
+    # protection enabled (see tests/conftest.py and TestCSRF).
+    "flask-wtf",
 ]
 
 [project.entry-points.otterwiki]
