@@ -1332,3 +1332,89 @@ class TestCSRF:
         csrf = CSRFProtect(app)
         _exempt_api_from_csrf(app)
         assert api_bp in csrf._exempt_blueprints
+
+
+# --- Spaced wikilinks resolve to the same edge as the on-disk name ---
+
+
+class TestSpacedWikilinks:
+    """With TREAT_UNDERSCORE_AS_SPACE_FOR_TITLES, [[Design Notes]] and
+    [[Design_Notes]] must be the same edge as the page Design_Notes.md."""
+
+    @pytest.fixture(autouse=True)
+    def underscore_config(self, create_app, test_client):
+        # The app and its storage are shared across tests, so restore the
+        # config and delete every page a test created.
+        keys = ("TREAT_UNDERSCORE_AS_SPACE_FOR_TITLES", "RETAIN_PAGE_NAME_CASE")
+        saved = {k: create_app.config.get(k) for k in keys}
+        for k in keys:
+            create_app.config[k] = True
+        self.created = []
+        yield
+        for path in self.created:
+            test_client.delete(f"/api/v1/pages/{path}", headers=AUTH_HEADERS)
+        create_app.config.update(saved)
+
+    def _put(self, client, path, content):
+        r = client.put(
+            f"/api/v1/pages/{path}", json={"content": content}, headers=AUTH_HEADERS
+        )
+        assert r.status_code in (200, 201), r.get_json()
+        self.created.append(path)
+
+    def _build(self, client):
+        self._put(client, "Home", "See [[Design Notes]] and [[Moderation]]")
+        self._put(client, "Design_Notes", "Back to [[Home]]")
+        self._put(client, "Moderation", "Rules")
+
+    def test_spaced_link_is_incoming_edge(self, test_client):
+        self._build(test_client)
+        r = test_client.get("/api/v1/links/Design_Notes", headers=AUTH_HEADERS)
+        assert r.get_json()["linked_from"] == ["Home"]
+
+    def test_links_to_uses_page_names_not_raw_text(self, test_client):
+        self._build(test_client)
+        r = test_client.get("/api/v1/links/Home", headers=AUTH_HEADERS)
+        assert r.get_json()["links_to"] == ["Design_Notes", "Moderation"]
+
+    def test_spaced_and_underscored_forms_are_one_edge(self, test_client):
+        self._put(test_client, "Design_Notes", "Notes")
+        self._put(test_client, "A", "[[Design Notes]] and [[Design_Notes]]")
+        r = test_client.get("/api/v1/links/A", headers=AUTH_HEADERS)
+        assert r.get_json()["links_to"] == ["Design_Notes"]
+        r = test_client.get("/api/v1/links/Design_Notes", headers=AUTH_HEADERS)
+        assert r.get_json()["linked_from"] == ["A"]
+
+    def test_get_page_reports_linked_from(self, test_client):
+        self._build(test_client)
+        r = test_client.get("/api/v1/pages/Design_Notes", headers=AUTH_HEADERS)
+        assert r.get_json()["linked_from"] == ["Home"]
+
+    def test_full_graph_has_no_spaced_duplicates(self, test_client):
+        self._build(test_client)
+        graph = test_client.get("/api/v1/links", headers=AUTH_HEADERS).get_json()
+        assert "Design_Notes" in graph["nodes"]
+        assert "Design Notes" not in graph["nodes"]
+
+    def test_rename_rewrites_spaced_links(self, test_client):
+        self._build(test_client)
+        r = test_client.post(
+            "/api/v1/pages/Design_Notes/rename",
+            json={"new_path": "Design Docs"},
+            headers=AUTH_HEADERS,
+        )
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()["updated_pages"] == ["Home"]
+        home = test_client.get("/api/v1/pages/Home", headers=AUTH_HEADERS).get_json()
+        assert "[[Design_Docs]]" in home["content"]
+        r = test_client.get("/api/v1/links/Design_Docs", headers=AUTH_HEADERS)
+        assert r.get_json()["linked_from"] == ["Home"]
+
+    def test_normalize_target_matches_core_get_filename(self, create_app):
+        from otterwiki.helper import get_filename
+        from otterwiki_api.wikilinks import normalize_target
+
+        for text in ("Design Notes", "Design_Notes", " Design  Notes ", "/Sub Dir/My Page#h"):
+            with create_app.app_context():
+                expected = get_filename(text.split("#")[0].strip())[:-3]
+            assert normalize_target(text, create_app.config) == expected

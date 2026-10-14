@@ -12,6 +12,7 @@ from otterwiki.gitstorage import StorageError, StorageNotFound
 from otterwiki.helper import get_attachment_directoryname
 from otterwiki.util import guess_mimetype
 
+from otterwiki_api.wikilinks import normalize_target
 from otterwiki_api import api_bp, _state, get_filename, resolve_filename, get_pagename, get_author
 from otterwiki_api.frontmatter import parse_frontmatter
 from otterwiki_api.search import search_pages
@@ -525,9 +526,7 @@ def page_links(path):
     if not index:
         return jsonify({"error": "WikiLink index not available"}), 500
 
-    config = _state["app"].config
-    retain_case = config.get("RETAIN_PAGE_NAME_CASE", False)
-    lookup_path = path if retain_case else path.lower()
+    lookup_path = normalize_target(path, _state["app"].config) or path
 
     link_data = index.get_links_for_page(lookup_path)
     return jsonify({
