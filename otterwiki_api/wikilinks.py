@@ -8,17 +8,23 @@ WIKILINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]")
 
 
 def normalize_target(target, config):
-    """Normalize a wikilink target to a page path."""
+    """Normalize a wikilink target to the page path it is stored under.
+
+    Produces the same key as otterwiki.helper.get_filename() (minus the
+    ".md"), so "[[Design Notes]]", "[[Design_Notes]]" and the page file
+    Design_Notes.md are all the same node in the index.
+    """
     target = target.strip()
-    if target.startswith("/"):
-        target = target[1:]
     if "#" in target:
         target = target.split("#")[0]
+    # Drop empty segments: leading/trailing and doubled slashes.
+    target = "/".join(part for part in target.split("/") if part)
     if not target:
         return None
-    retain_case = config.get("RETAIN_PAGE_NAME_CASE", False)
-    if not retain_case:
+    if not config.get("RETAIN_PAGE_NAME_CASE", False):
         target = target.lower()
+    if config.get("TREAT_UNDERSCORE_AS_SPACE_FOR_TITLES", False):
+        target = target.replace(" ", "_")
     return target
 
 
